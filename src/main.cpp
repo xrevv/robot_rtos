@@ -54,25 +54,36 @@ void updateText();
 
 void setup()
 {
-    M5.begin(true, false, true, true);
+    M5.begin(true, true, true, true);
+    M5.Lcd.drawJpgFile(SD, "/logo.jpg");
 
     Serial.begin(115200);
-
-    // Initializing PWM driver
-    pwm.begin();
-    pwm.setPWMFreq(60);
 
     // Setting initial state
     setMem();
     for (size_t i = 0; i < servoNum; i++)
     {
         servoPos[i] = servoSPos[i][0];
-        updateScreen(i);
     }
-    updateText();
+
+    // Initializing PWM driver
+    pwm.begin();
+    pwm.setPWMFreq(60);
 
     // Initializing Bluetooth
     Bluetooth.begin("M5Core2");
+
+    while (!Bluetooth.available()) // Check BT
+    {
+        // Nothing to do
+    }
+
+    M5.Lcd.clear(BLACK);
+    for (size_t i = 0; i < servoNum; i++)
+    {
+        updateScreen(i);
+    }
+    updateText();
 }
 
 void loop()
