@@ -3,6 +3,9 @@
 #include <Adafruit_PWMServoDriver.h>
 #include <BluetoothSerial.h>
 
+// Task stack size
+#define STACK 2048
+
 // Initial positions
 #define servo01235InitPos 90;
 #define servo4InitPos 0;
@@ -44,16 +47,43 @@ int indexS = 0;
 // Received BT data
 String dataIn = "";
 
-// Function prototypes
-void moveServo(int whichServo, int PosServo);
+enum Mode
+{
+    move = 0,
+    play = 1,
+    stop = 2
+};
+
+struct MoveCommand
+{
+    int whichServo;
+    int posServo;
+    Mode mode;
+};
+
+// Queue
+static QueueHandle_t xQueueMove;
+static QueueHandle_t xQueueDraw;
+
+// Prototypes
+// Tasks
+void taskMoveServo(void *param);
+void taskBT(void *param);
+void taskUpdateScreen(void *param);
+
+// Functions
 void setMem();
+void saveMem();
 bool checkPos(int pos);
 int mapper(int value);
-void updateScreen(int servo);
 void updateText();
+
+// Tasks
 
 void setup()
 {
+    disableCore0WDT();
+
     M5.begin(true, true, true, true);
     M5.Lcd.drawJpgFile(SD, "/logo.jpg");
 
@@ -78,136 +108,195 @@ void setup()
         // Nothing to do
     }
 
+    // Creating queues
+    xQueueMove = xQueueCreate(10, sizeof(MoveCommand));
+    xQueueDraw = xQueueCreate(10, sizeof(int));
+
+    // Initializing the screen
     M5.Lcd.clear(BLACK);
     for (size_t i = 0; i < servoNum; i++)
     {
-        updateScreen(i);
+        if (xQueueSend(xQueueDraw, (void *)&i, 10) != pdTRUE)
+        {
+            Serial.println("ERROR: Could not put item on draw queue.");
+        }
     }
     updateText();
+
+    // Creating tasks
+    xTaskCreate(taskMoveServo, "MoveServo", STACK, NULL, 1, NULL);
+    xTaskCreate(taskBT, "BT", STACK, NULL, 2, NULL);
+    xTaskCreate(taskUpdateScreen, "updateScreen", STACK, NULL, 3, NULL);
+
+    vTaskDelete(NULL);
 }
 
-void loop()
+void loop() {}
+
+void taskBT(void *param)
 {
-
-    while (!Bluetooth.available()) // Check BT
+    MoveCommand command;
+    while (1)
     {
-        // Nothing to do
-    }
-
-    dataIn = Bluetooth.readStringUntil('\n'); // Receive BT data
-    Serial.println(dataIn);
-
-    if (dataIn.startsWith("s")) // Servo position?
-    {
-        // Which servo?
-        String dataInServo = dataIn.substring(1, 2);
-        int SelectServo = dataInServo.toInt() - 1;
-
-        // Which position?
-        String dataInServoPos = dataIn.substring(2, dataIn.length());
-        int PosServo = dataInServoPos.toInt();
-
-        moveServo(SelectServo, PosServo);
-        updateScreen(SelectServo);
-    }
-    else if (dataIn.startsWith("c")) // Command?
-    {
-        // Which command?
-        String dataInFunc = dataIn.substring(1, 2);
-        int SelectFunc = dataInFunc.toInt();
-
-        switch (SelectFunc)
+        while (!Bluetooth.available()) // Check BT
         {
+            vTaskDelay(pdMS_TO_TICKS(100)); // Nothing to do
+        }
 
-        case 1: // Save
+        dataIn = Bluetooth.readStringUntil('n'); // Receive BT data
+        Serial.println(dataIn);
+        if (dataIn.startsWith("s")) // Servo position?
+        {
+            // Which servo?
+            String dataInServo = dataIn.substring(1, 2);
+            int SelectServo = dataInServo.toInt() - 1;
 
-            // Save all current servo positions
-            if (indexS < memory)
+            // Which position?
+            String dataInServoPos = dataIn.substring(2, dataIn.length());
+            int posServo = dataInServoPos.toInt();
+
+            command.whichServo = SelectServo;
+            command.posServo = posServo;
+            command.mode = move;
+
+            xQueueSend(xQueueMove, (void *)&command, 10);
+            xQueueSend(xQueueDraw, (void *)&SelectServo, 10);
+        }
+        else if (dataIn.startsWith("c")) // Command?
+        {
+            // Which command?
+            String dataInFunc = dataIn.substring(1, 2);
+            int SelectFunc = dataInFunc.toInt();
+
+            switch (SelectFunc)
             {
-                for (size_t i = 0; i < servoNum; i++)
+            case 1: // Save
+                // Save all current servo positions
+                saveMem();
+                break;
+
+            case 2:                  // Play
+                command.mode = play; // Repeat until Stop command
+                xQueueSend(xQueueMove, (void *)&command, 10);
+                break;
+
+            case 3:                  // Stop
+                command.mode = stop; // Stop command
+                xQueueSend(xQueueMove, (void *)&command, 10);
+                break;
+
+            case 4:       // Reset
+                setMem(); // Setting initial positions
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+}
+
+void taskMoveServo(void *param)
+{
+    MoveCommand command;
+    while (1)
+    {
+        if (xQueueReceive(xQueueMove, (void *)&command, 0) == pdTRUE)
+        {
+            switch (command.mode)
+            {
+            case move:
+            {
+                int whichServo = command.whichServo;
+                int posServo = command.posServo;
+
+                servoPos[whichServo] = posServo;
+
+                // Movement speed adjustment
+                int offset = 2;
+
+                if (whichServo <= 2)
                 {
-                    servoSPos[i][indexS] = servoPos[i];
+                    offset = 30;
                 }
-                indexS++;
+
+                if (servoPos[whichServo] > servoPPos[whichServo])
+                {
+                    for (int i = servoPPos[whichServo]; i <= servoPos[whichServo]; i += offset)
+                    {
+                        pwm.writeMicroseconds(whichServo, mapper(i));
+                    }
+                    pwm.writeMicroseconds(whichServo, mapper(servoPos[whichServo]));
+                }
+                else if (servoPos[whichServo] < servoPPos[whichServo])
+                {
+                    for (int i = servoPPos[whichServo]; i >= servoPos[whichServo]; i -= offset)
+                    {
+                        pwm.writeMicroseconds(whichServo, mapper(i));
+                    }
+                    pwm.writeMicroseconds(whichServo, mapper(servoPos[whichServo]));
+                }
+
+                servoPPos[whichServo] = servoPos[whichServo];
+                break;
             }
 
-            break;
-
-        case 2: // Play
-
-            // Repeat until Stop command
-            while (!dataIn.startsWith("c3"))
+            case play: // Repeat until Stop command
             {
-                for (int j = 0; j < indexS; j++)
+                while (command.mode != stop)
                 {
-
-                    dataIn = Bluetooth.readString(); // Receive BT data
-                    if (dataIn.startsWith("c3"))     // Stop?
+                    for (int j = 0; j < indexS; j++)
                     {
-                        break;
-                    }
-
-                    // Move all servos simultaneously
-                    while (checkPos(j)) // Check if all servos are in posiotion
-                    {
-                        for (size_t i = 0; i < servoNum; i++)
+                        xQueueReceive(xQueueMove, (void *)&command, 10);
+                        if (command.mode == stop) // Stop?
                         {
-                            if (servoPos[i] > servoSPos[i][j])
+                            break;
+                        }
+
+                        // Move all servos simultaneously
+                        while (checkPos(j)) // Check if all servos are in posiotion
+                        {
+                            for (size_t i = 0; i < servoNum; i++)
                             {
-                                pwm.writeMicroseconds(i, mapper(--servoPos[i]));
+                                if (servoPos[i] > servoSPos[i][j])
+                                {
+                                    pwm.writeMicroseconds(i, mapper(--servoPos[i]));
+                                }
+                                else if (servoPos[i] < servoSPos[i][j])
+                                {
+                                    pwm.writeMicroseconds(i, mapper(++servoPos[i]));
+                                }
+                                xQueueSend(xQueueDraw, (void *)&i, 10);
                             }
-                            else if (servoPos[i] < servoSPos[i][j])
-                            {
-                                pwm.writeMicroseconds(i, mapper(++servoPos[i]));
-                            }
-                            updateScreen(i);
                         }
                     }
                 }
+                break;
             }
 
-            break;
-
-        case 4: // Reset
-
-            setMem(); // Setting initial positions
-
-            break;
+            default:
+                break;
+            }
         }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
-void moveServo(int whichServo, int PosServo)
+void taskUpdateScreen(void *param)
 {
-    servoPos[whichServo] = PosServo;
-
-    // Movement speed adjustment
-    int offset = 2;
-
-    if (whichServo <= 2)
+    int servo;
+    while (1)
     {
-        offset = 30;
-    }
-
-    if (servoPos[whichServo] > servoPPos[whichServo])
-    {
-        for (int i = servoPPos[whichServo]; i <= servoPos[whichServo]; i += offset)
+        if (xQueueReceive(xQueueDraw, (void *)&servo, 0) == pdTRUE)
         {
-            pwm.writeMicroseconds(whichServo, mapper(i));
+            int pos = (servoPos[servo] / float(servoPosMax[servo])) * 320;
+            M5.Lcd.fillRect(0, servoPosScreen[servo], pos, 20, RED);
+            M5.Lcd.fillRect(pos, servoPosScreen[servo], 320, 20, BLACK);
         }
-        pwm.writeMicroseconds(whichServo, mapper(servoPos[whichServo]));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-    else if (servoPos[whichServo] < servoPPos[whichServo])
-    {
-        for (int i = servoPPos[whichServo]; i >= servoPos[whichServo]; i -= offset)
-        {
-            pwm.writeMicroseconds(whichServo, mapper(i));
-        }
-        pwm.writeMicroseconds(whichServo, mapper(servoPos[whichServo]));
-    }
-
-    servoPPos[whichServo] = servoPos[whichServo];
 }
+
+// Functions
+
 bool checkPos(int pos)
 {
     for (size_t i = 0; i < servoNum; i++)
@@ -234,16 +323,21 @@ void setMem()
     indexS = 0;
 }
 
+void saveMem()
+{
+    if (indexS < memory)
+    {
+        for (size_t i = 0; i < servoNum; i++)
+        {
+            servoSPos[i][indexS] = servoPos[i];
+        }
+        indexS++;
+    }
+}
+
 int mapper(int value)
 {
     return map(value, 0, 180, minUs, maxUs);
-}
-
-void updateScreen(int servo)
-{
-    int pos = (servoPos[servo] / float(servoPosMax[servo])) * 320;
-    M5.Lcd.fillRect(0, servoPosScreen[servo], pos, 20, RED);
-    M5.Lcd.fillRect(pos, servoPosScreen[servo], 320, 20, BLACK);
 }
 
 void updateText()
