@@ -89,19 +89,20 @@ void setup()
 
     Serial.begin(115200);
 
-    // Setting initial state
-    setMem();
-    for (size_t i = 0; i < servoNum; i++)
-    {
-        servoPos[i] = servoSPos[i][0];
-    }
-
     // Initializing PWM driver
     pwm.begin();
     pwm.setPWMFreq(60);
 
     // Initializing Bluetooth
     Bluetooth.begin("M5Core2");
+
+    // Setting initial state
+    setMem();
+    for (size_t i = 0; i < servoNum; i++)
+    {
+        servoPos[i] = servoSPos[i][0];
+        pwm.writeMicroseconds(i, mapper(servoPos[i]));
+    }
 
     while (!Bluetooth.available()) // Check BT
     {
