@@ -44,9 +44,6 @@ int servoSPos[servoNum][memory];
 // Position in saved positions
 int indexS = 0;
 
-// Received BT data
-String dataIn = "";
-
 enum Mode
 {
     move = 0,
@@ -62,13 +59,15 @@ struct MoveCommand
 };
 
 // Queue
+static QueueHandle_t xQueueData;
 static QueueHandle_t xQueueMove;
 static QueueHandle_t xQueueDraw;
 
 // Prototypes
 // Tasks
-void taskMoveServo(void *param);
 void taskBT(void *param);
+void taskParser(void *param);
+void taskMoveServo(void *param);
 void taskUpdateScreen(void *param);
 
 // Functions
@@ -110,6 +109,7 @@ void setup()
     }
 
     // Creating queues
+    xQueueData = xQueueCreate(10, sizeof(String));
     xQueueMove = xQueueCreate(10, sizeof(MoveCommand));
     xQueueDraw = xQueueCreate(10, sizeof(int));
 
@@ -125,9 +125,10 @@ void setup()
     updateText();
 
     // Creating tasks
-    xTaskCreate(taskMoveServo, "MoveServo", STACK, NULL, 1, NULL);
-    xTaskCreate(taskBT, "BT", STACK, NULL, 2, NULL);
-    xTaskCreate(taskUpdateScreen, "updateScreen", STACK, NULL, 3, NULL);
+    xTaskCreate(taskBT, "BT", STACK, NULL, 1, NULL);
+    xTaskCreate(taskParser, "Parser", STACK, NULL, 2, NULL);
+    xTaskCreate(taskMoveServo, "MoveServo", STACK, NULL, 3, NULL);
+    xTaskCreate(taskUpdateScreen, "updateScreen", STACK, NULL, 4, NULL);
 
     vTaskDelete(NULL);
 }
@@ -136,7 +137,8 @@ void loop() {}
 
 void taskBT(void *param)
 {
-    MoveCommand command;
+    String data;
+
     while (1)
     {
         while (!Bluetooth.available()) // Check BT
@@ -144,53 +146,61 @@ void taskBT(void *param)
             vTaskDelay(pdMS_TO_TICKS(100)); // Nothing to do
         }
 
-        dataIn = Bluetooth.readStringUntil('n'); // Receive BT data
-        Serial.println(dataIn);
-        if (dataIn.startsWith("s")) // Servo position?
+        data = Bluetooth.readStringUntil('n'); // Receive BT data
+        Serial.println(data);
+        if (xQueueSend(xQueueData, (void *)&data, 10) != pdTRUE)
         {
-            // Which servo?
-            String dataInServo = dataIn.substring(1, 2);
-            int SelectServo = dataInServo.toInt() - 1;
-
-            // Which position?
-            String dataInServoPos = dataIn.substring(2, dataIn.length());
-            int posServo = dataInServoPos.toInt();
-
-            command.whichServo = SelectServo;
-            command.posServo = posServo;
-            command.mode = move;
-
-            xQueueSend(xQueueMove, (void *)&command, 10);
-            xQueueSend(xQueueDraw, (void *)&SelectServo, 10);
+            Serial.println("ERROR: Could not put item on data queue.");
         }
-        else if (dataIn.startsWith("c")) // Command?
+    }
+}
+
+void taskParser(void *param)
+{
+    String data;
+    MoveCommand command;
+
+    while (1)
+    {
+        if (xQueueReceive(xQueueData, (void *)&data, 0) == pdTRUE)
         {
-            // Which command?
-            String dataInFunc = dataIn.substring(1, 2);
-            int SelectFunc = dataInFunc.toInt();
-
-            switch (SelectFunc)
+            if (data.startsWith("s")) // Servo position?
             {
-            case 1: // Save
-                // Save all current servo positions
-                saveMem();
-                break;
+                command.whichServo = data.substring(1, 2).toInt() - 1;
+                command.posServo = data.substring(2, data.length()).toInt();
+                command.mode = move;
 
-            case 2:                  // Play
-                command.mode = play; // Repeat until Stop command
                 xQueueSend(xQueueMove, (void *)&command, 10);
-                break;
-
-            case 3:                  // Stop
-                command.mode = stop; // Stop command
-                xQueueSend(xQueueMove, (void *)&command, 10);
-                break;
-
-            case 4:       // Reset
-                setMem(); // Setting initial positions
-                break;
+                xQueueSend(xQueueDraw, (void *)&command.whichServo, 10);
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
+            else if (data.startsWith("c")) // Command?
+            {
+                // Which command?
+                int SelectFunc = data.substring(1, 2).toInt();
+
+                switch (SelectFunc)
+                {
+                case 1: // Save
+                    // Save all current servo positions
+                    saveMem();
+                    break;
+
+                case 2:                  // Play
+                    command.mode = play; // Repeat until Stop command
+                    xQueueSend(xQueueMove, (void *)&command, 10);
+                    break;
+
+                case 3:                  // Stop
+                    command.mode = stop; // Stop command
+                    xQueueSend(xQueueMove, (void *)&command, 10);
+                    break;
+
+                case 4:       // Reset
+                    setMem(); // Setting initial positions
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
     }
 }
