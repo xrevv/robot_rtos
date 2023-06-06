@@ -27,10 +27,10 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 BluetoothSerial Bluetooth;
 
 // Servo screen positions
-int servoPosScreen[] = {20, 60, 100, 140, 180, 220};
+const int servoPosScreen[] = {20, 60, 100, 140, 180, 220};
 
 // Servo max positions
-int servoPosMax[] = {180, 180, 180, 180, 130, 180};
+const int servoPosMax[] = {180, 180, 180, 180, 130, 180};
 
 // Servo positions
 int servoPos[servoNum];
